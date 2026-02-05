@@ -5,9 +5,11 @@ Features:
 - Async streaming support
 - Tool execution management
 - Session persistence
+- MCP server integration
 """
 
 import asyncio
+import json
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -26,6 +28,7 @@ from claude_code_sdk import (
 )
 from claude_code_sdk.types import (
     AssistantMessage,
+    McpServerConfig,
     ResultMessage,
     TextBlock,
     ToolResultBlock,
@@ -151,6 +154,124 @@ class ClaudeSDKManager:
         else:
             logger.info("No API key provided, using existing Claude CLI authentication")
 
+        # Load MCP servers from config
+        self._mcp_servers = self._load_mcp_servers()
+        if self._mcp_servers:
+            logger.info(
+                "Loaded MCP servers",
+                servers=list(self._mcp_servers.keys()),
+            )
+
+    def _load_mcp_servers(self) -> Dict[str, McpServerConfig]:
+        """Load MCP server configurations from ~/.claude.json and project configs."""
+        mcp_servers: Dict[str, McpServerConfig] = {}
+
+        # First, try loading from global ~/.claude.json
+        global_config_path = Path.home() / ".claude.json"
+        if global_config_path.exists():
+            try:
+                with open(global_config_path, "r") as f:
+                    config_data = json.load(f)
+
+                # Check for project-specific MCP servers under "projects" key
+                projects = config_data.get("projects", {})
+                approved_dir = str(self.config.approved_directory)
+
+                for project_path, project_config in projects.items():
+                    # Match project path to approved directory
+                    if approved_dir.startswith(project_path) or project_path == approved_dir:
+                        project_mcp = project_config.get("mcpServers", {})
+                        for name, server_config in project_mcp.items():
+                            converted = self._convert_mcp_config(name, server_config)
+                            if converted:
+                                mcp_servers[name] = converted
+                                logger.debug(
+                                    "Loaded MCP server from project config",
+                                    server=name,
+                                    project=project_path,
+                                )
+
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(
+                    "Failed to load global Claude config",
+                    path=str(global_config_path),
+                    error=str(e),
+                )
+
+        # Also check for project-specific .claude.json in approved directory
+        project_config_path = self.config.approved_directory / ".claude.json"
+        if project_config_path.exists():
+            try:
+                with open(project_config_path, "r") as f:
+                    project_data = json.load(f)
+
+                project_mcp = project_data.get("mcpServers", {})
+                for name, server_config in project_mcp.items():
+                    converted = self._convert_mcp_config(name, server_config)
+                    if converted:
+                        mcp_servers[name] = converted
+                        logger.debug(
+                            "Loaded MCP server from project .claude.json",
+                            server=name,
+                        )
+
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(
+                    "Failed to load project Claude config",
+                    path=str(project_config_path),
+                    error=str(e),
+                )
+
+        return mcp_servers
+
+    def _convert_mcp_config(
+        self, name: str, config: Dict[str, Any]
+    ) -> Optional[McpServerConfig]:
+        """Convert Claude config MCP format to SDK McpServerConfig format.
+
+        Claude config format:
+        {
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "@some/mcp-server"],
+            "env": {}
+        }
+
+        SDK format:
+        {
+            "transport": ["npx", "-y", "@some/mcp-server"],
+            "env": {}
+        }
+        """
+        try:
+            server_type = config.get("type", "stdio")
+            if server_type != "stdio":
+                logger.warning(
+                    "Unsupported MCP server type",
+                    server=name,
+                    type=server_type,
+                )
+                return None
+
+            command = config.get("command")
+            if not command:
+                logger.warning("MCP server missing command", server=name)
+                return None
+
+            # Build transport as [command, ...args]
+            transport = [command] + config.get("args", [])
+            env = config.get("env", {})
+
+            return McpServerConfig(transport=transport, env=env)
+
+        except Exception as e:
+            logger.warning(
+                "Failed to convert MCP config",
+                server=name,
+                error=str(e),
+            )
+            return None
+
     async def execute_command(
         self,
         prompt: str,
@@ -170,11 +291,12 @@ class ClaudeSDKManager:
         )
 
         try:
-            # Build Claude Code options
+            # Build Claude Code options with MCP servers
             options = ClaudeCodeOptions(
                 max_turns=self.config.claude_max_turns,
                 cwd=str(working_directory),
                 allowed_tools=self.config.claude_allowed_tools,
+                mcp_servers=self._mcp_servers if self._mcp_servers else {},
             )
 
             # Collect messages

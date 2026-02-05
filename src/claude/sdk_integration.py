@@ -162,6 +162,32 @@ class ClaudeSDKManager:
                 servers=list(self._mcp_servers.keys()),
             )
 
+        # Load user context for system prompt
+        self._user_context = self._load_user_context()
+        if self._user_context:
+            logger.info("Loaded user context for system prompt")
+
+    def _load_user_context(self) -> Optional[str]:
+        """Load user context from MEMORY.md or profile for system prompt."""
+        context_parts = []
+
+        # Try loading from Claude memory
+        memory_path = Path.home() / ".claude" / "projects" / "-home-rsgadmin" / "memory" / "MEMORY.md"
+        if memory_path.exists():
+            try:
+                with open(memory_path, "r") as f:
+                    memory_content = f.read()
+                if memory_content.strip():
+                    context_parts.append(memory_content)
+                    logger.debug("Loaded context from MEMORY.md")
+            except IOError as e:
+                logger.warning("Failed to load MEMORY.md", error=str(e))
+
+        if not context_parts:
+            return None
+
+        return "\n\n".join(context_parts)
+
     def _load_mcp_servers(self) -> Dict[str, McpServerConfig]:
         """Load MCP server configurations from ~/.claude.json and project configs."""
         mcp_servers: Dict[str, McpServerConfig] = {}
@@ -302,6 +328,7 @@ class ClaudeSDKManager:
                 cwd=str(working_directory),
                 allowed_tools=self.config.claude_allowed_tools,
                 permission_mode="bypassPermissions" if self._mcp_servers else None,
+                append_system_prompt=self._user_context,
             )
 
             # Collect messages

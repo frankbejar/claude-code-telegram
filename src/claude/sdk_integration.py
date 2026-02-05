@@ -292,11 +292,14 @@ class ClaudeSDKManager:
 
         try:
             # Build Claude Code options with MCP servers
+            # Note: When MCP servers are configured, we need bypassPermissions mode
+            # because --print mode doesn't allow interactive permission prompts
             options = ClaudeCodeOptions(
                 max_turns=self.config.claude_max_turns,
                 cwd=str(working_directory),
                 allowed_tools=self.config.claude_allowed_tools,
                 mcp_servers=self._mcp_servers if self._mcp_servers else {},
+                permission_mode="bypassPermissions" if self._mcp_servers else None,
             )
 
             # Collect messages
